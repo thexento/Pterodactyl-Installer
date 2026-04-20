@@ -38,6 +38,45 @@ success() { echo -e "${GREEN}[ OK ]${NC}  $*" | tee -a "$LOG_FILE"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[ERR ]${NC}  $*" | tee -a "$LOG_FILE"; }
 
+###############################################################################
+# SPINNER — shows animated spinner + elapsed time for long-running steps
+###############################################################################
+
+SPIN_PID=""
+
+spin_start() {
+  local msg="$*"
+  echo "[SPIN] $msg" >> "$LOG_FILE"
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  (
+    local i=0 elapsed=0
+    while true; do
+      local frame="${frames[$((i % 10))]}"
+      local mins=$(( elapsed / 60 ))
+      local secs=$(( elapsed % 60 ))
+      printf "\r  \033[1;36m%s\033[0m  %s  \033[2m[%02d:%02d]\033[0m   " \
+        "$frame" "$msg" "$mins" "$secs"
+      sleep 1
+      (( i++ )) || true
+      (( elapsed++ )) || true
+    done
+  ) &
+  SPIN_PID=$!
+  disown "$SPIN_PID" 2>/dev/null || true
+}
+
+spin_stop() {
+  if [[ -n "$SPIN_PID" ]]; then
+    kill "$SPIN_PID" 2>/dev/null || true
+    wait "$SPIN_PID" 2>/dev/null || true
+    SPIN_PID=""
+  fi
+  printf "\r%-80s\r" " "
+}
+
+# Make sure spinner is killed if the script exits unexpectedly
+trap 'spin_stop' EXIT INT TERM
+
 # Run a command, show output live, log it, and abort with a clear message on failure
 run() {
   local desc="$1"; shift
@@ -308,7 +347,7 @@ panel_add_php_repo() {
 }
 
 panel_install_deps() {
-  info "Installing PHP 8.3, MariaDB, NGINX, Redis..."
+  spin_start "Installing PHP 8.3, MariaDB, NGINX, Redis"
   apt-get install -y \
     php8.3 php8.3-cli php8.3-common php8.3-gd \
     php8.3-mysql php8.3-mbstring php8.3-bcmath \
@@ -316,6 +355,7 @@ panel_install_deps() {
     mariadb-server mariadb-client \
     nginx redis-server \
     >> "$LOG_FILE" 2>&1
+  spin_stop
   success "Dependencies installed"
 }
 
@@ -340,18 +380,16 @@ panel_firewall() {
 }
 
 panel_install_composer() {
-  info "Installing Composer..."
-  # Download installer, verify it, then install
+  spin_start "Installing Composer"
   curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php >> "$LOG_FILE" 2>&1
   php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer >> "$LOG_FILE" 2>&1
   rm -f /tmp/composer-setup.php
-
-  # Hard verify composer is callable
+  spin_stop
   if ! /usr/local/bin/composer --version >> "$LOG_FILE" 2>&1; then
-    error "Composer installation failed — /usr/local/bin/composer not found or not executable."
+    error "Composer installation failed."
     exit 1
   fi
-  success "Composer installed at /usr/local/bin/composer"
+  success "Composer installed"
 }
 
 panel_setup_db() {
@@ -375,7 +413,7 @@ panel_download() {
     exit 1
   fi
 
-  info "Downloading Pterodactyl Panel ${PANEL_VER}..."
+  spin_start "Downloading Pterodactyl Panel ${PANEL_VER}"
   mkdir -p /var/www/pterodactyl
   cd /var/www/pterodactyl
 
@@ -385,24 +423,24 @@ panel_download() {
   rm -f panel.tar.gz
   chmod -R 755 storage/* bootstrap/cache/
   cp .env.example .env
+  spin_stop
   success "Panel ${PANEL_VER} downloaded"
 }
 
 panel_composer_deps() {
-  info "Installing Composer dependencies (may take a few minutes)..."
   cd /var/www/pterodactyl
-
-  # Use explicit path to avoid any PATH issues
+  spin_start "Installing Composer dependencies (this can take 3-5 minutes)"
+  # --no-progress prevents the animated progress bar which garbles the spinner
+  # We show individual package lines via tee so the log has detail
   COMPOSER_ALLOW_SUPERUSER=1 /usr/local/bin/composer install \
     --no-dev \
     --optimize-autoloader \
     --no-interaction \
     --no-progress \
-    2>&1 | tee -a "$LOG_FILE"
-
-  # Verify vendor directory was actually created
+    >> "$LOG_FILE" 2>&1
+  spin_stop
   if [ ! -f /var/www/pterodactyl/vendor/autoload.php ]; then
-    error "Composer did not create vendor/autoload.php — dependencies failed to install."
+    error "Composer failed — vendor/autoload.php missing. Check: $LOG_FILE"
     exit 1
   fi
   success "Composer dependencies installed"
@@ -443,8 +481,10 @@ panel_configure() {
     --no-interaction \
     2>&1 | tee -a "$LOG_FILE"
 
-  info "Running database migrations (this may take a moment)..."
-  php artisan migrate --seed --force 2>&1 | tee -a "$LOG_FILE"
+  spin_start "Running database migrations"
+  php artisan migrate --seed --force >> "$LOG_FILE" 2>&1
+  spin_stop
+  success "Migrations complete"
 
   info "Creating admin user..."
   php artisan p:user:make \
@@ -769,25 +809,20 @@ wings_firewall() {
 }
 
 wings_install_docker() {
-  info "Installing Docker..."
-  # Remove any old versions
+  spin_start "Installing Docker"
   apt-get remove -y docker docker-engine docker.io containerd runc >> "$LOG_FILE" 2>&1 || true
-
+  mkdir -p /etc/apt/keyrings
   curl -fsSL "https://download.docker.com/linux/${OS}/gpg" \
     | gpg --dearmor -o /etc/apt/keyrings/docker.gpg >> "$LOG_FILE" 2>&1
   chmod a+r /etc/apt/keyrings/docker.gpg
-
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/${OS} $(lsb_release -cs) stable" \
     > /etc/apt/sources.list.d/docker.list
-
   apt-get update -y >> "$LOG_FILE" 2>&1
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
     >> "$LOG_FILE" 2>&1
-
   systemctl enable --now docker >> "$LOG_FILE" 2>&1
-
-  # Verify Docker is actually running
+  spin_stop
   if ! docker info >> "$LOG_FILE" 2>&1; then
     error "Docker installed but failed to start."
     exit 1
@@ -831,14 +866,14 @@ wings_download() {
     exit 1
   fi
 
+  spin_start "Downloading Wings ${WINGS_VER} (${ARCH})"
   curl -fsSL \
     "https://github.com/pterodactyl/wings/releases/download/${WINGS_VER}/wings_linux_${ARCH}" \
     -o /usr/local/bin/wings >> "$LOG_FILE" 2>&1
   chmod +x /usr/local/bin/wings
-
-  # Verify the binary works
+  spin_stop
   if ! /usr/local/bin/wings --version >> "$LOG_FILE" 2>&1; then
-    error "Wings binary downloaded but failed to execute."
+    error "Wings binary failed to execute."
     exit 1
   fi
   success "Wings ${WINGS_VER} (${ARCH}) downloaded"
