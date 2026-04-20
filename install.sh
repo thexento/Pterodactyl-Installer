@@ -852,31 +852,69 @@ wings_download() {
   info "Downloading Pterodactyl Wings (latest)..."
   mkdir -p /etc/pterodactyl
 
-  case "$(uname -m)" in
-    x86_64)  ARCH="amd64" ;;
-    aarch64) ARCH="arm64" ;;
-    *) error "Unsupported architecture: $(uname -m)"; exit 1 ;;
+  # Detect architecture with multiple fallback methods
+  local raw_arch
+  raw_arch="$(uname -m)"
+  case "$raw_arch" in
+    x86_64|amd64)           ARCH="amd64" ;;
+    aarch64|arm64|armv8*)   ARCH="arm64" ;;
+    *) error "Unsupported architecture: $raw_arch"; exit 1 ;;
   esac
+  info "Detected architecture: $raw_arch → wings_linux_${ARCH}"
 
+  # Fetch latest version — with fallback if GitHub API rate-limits
   WINGS_VER=$(curl -fsSL https://api.github.com/repos/pterodactyl/wings/releases/latest \
     | grep '"tag_name"' | cut -d'"' -f4)
 
   if [[ -z "$WINGS_VER" ]]; then
-    error "Could not fetch Wings version from GitHub API."
+    warn "GitHub API failed — trying alternate version fetch..."
+    WINGS_VER=$(curl -fsSL https://api.github.com/repos/pterodactyl/wings/releases \
+      | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+  fi
+
+  if [[ -z "$WINGS_VER" ]]; then
+    error "Could not fetch Wings version. Check internet connectivity."
+    exit 1
+  fi
+  info "Latest Wings version: $WINGS_VER"
+
+  local WINGS_URL="https://github.com/pterodactyl/wings/releases/download/${WINGS_VER}/wings_linux_${ARCH}"
+  info "Download URL: $WINGS_URL"
+
+  spin_start "Downloading Wings ${WINGS_VER} (${ARCH})"
+  # Download to a temp file first so we can check it before installing
+  curl -fsSL "$WINGS_URL" -o /tmp/wings_download >> "$LOG_FILE" 2>&1
+  spin_stop
+
+  # Check the downloaded file is actually an ELF binary, not an HTML error page
+  local file_type
+  file_type="$(file /tmp/wings_download 2>/dev/null || true)"
+  info "Downloaded file type: $file_type" >> "$LOG_FILE" 2>&1 || true
+  echo "Downloaded file type: $file_type" >> "$LOG_FILE"
+
+  if echo "$file_type" | grep -qiE "HTML|ASCII text|empty"; then
+    error "Downloaded file is not a binary (got HTML/text — likely a 404 or GitHub error)."
+    error "URL tried: $WINGS_URL"
+    error "Run: curl -I \"$WINGS_URL\" to check manually."
+    rm -f /tmp/wings_download
     exit 1
   fi
 
-  spin_start "Downloading Wings ${WINGS_VER} (${ARCH})"
-  curl -fsSL \
-    "https://github.com/pterodactyl/wings/releases/download/${WINGS_VER}/wings_linux_${ARCH}" \
-    -o /usr/local/bin/wings >> "$LOG_FILE" 2>&1
+  mv /tmp/wings_download /usr/local/bin/wings
   chmod +x /usr/local/bin/wings
-  spin_stop
+
+  # Test execution
   if ! /usr/local/bin/wings --version >> "$LOG_FILE" 2>&1; then
-    error "Wings binary failed to execute."
+    # Get the actual error message for diagnosis
+    local exec_err
+    exec_err=$(/usr/local/bin/wings --version 2>&1 || true)
+    error "Wings binary failed to execute: $exec_err"
+    error "Architecture mismatch or missing shared libraries."
+    error "Your machine reports: $raw_arch"
     exit 1
   fi
-  success "Wings ${WINGS_VER} (${ARCH}) downloaded"
+
+  success "Wings ${WINGS_VER} (${ARCH}) downloaded and verified"
 }
 
 wings_service() {
