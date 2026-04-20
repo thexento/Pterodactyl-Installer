@@ -39,6 +39,65 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[ERR ]${NC}  $*" | tee -a "$LOG_FILE"; }
 
 ###############################################################################
+# SPINNER — simplified animated spinner for long-running steps
+###############################################################################
+
+SPIN_PID=""
+
+spin_start() {
+  local msg="$*"
+  echo "[SPIN] $msg" >> "$LOG_FILE"
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  (
+    local i=0 elapsed=0
+    while true; do
+      local frame="${frames[$((i % 10))]}"
+      local mins=$(( elapsed / 60 ))
+      local secs=$(( elapsed % 60 ))
+      printf "\r  \033[1;36m%s\033[0m  %s  \033[2m[%02d:%02d]\033[0m   " \
+        "$frame" "$msg" "$mins" "$secs"
+      sleep 1
+      (( i++ )) || true
+      (( elapsed++ )) || true
+    done
+  ) &
+  SPIN_PID=$!
+  disown "$SPIN_PID" 2>/dev/null || true
+}
+
+spin_stop() {
+  if [[ -n "$SPIN_PID" ]]; then
+    kill "$SPIN_PID" 2>/dev/null || true
+    wait "$SPIN_PID" 2>/dev/null || true
+    SPIN_PID=""
+  fi
+  printf "\r%-80s\r" " "
+}
+
+# Make sure spinner is killed if the script exits unexpectedly
+trap 'spin_stop' EXIT INT TERM
+
+# Run a command, show output live, log it, and abort with a clear message on failure
+run() {
+  local desc="$1"; shift
+  info "$desc"
+  spin_start "$desc"
+  if ! "$@" 2>&1 | tee -a "$LOG_FILE"; then
+    spin_stop
+    error "FAILED: $desc"
+    error "Check the log: $LOG_FILE"
+    exit 1
+  fi
+  spin_stop
+  success "$desc"
+}
+
+# Silent run — log only, no live output (for quick non-critical steps)
+run_q() {
+  "$@" >> "$LOG_FILE" 2>&1 || true
+}
+
+###############################################################################
 # HEADER
 ###############################################################################
 
@@ -103,15 +162,11 @@ detect_os() {
 }
 
 bootstrap_deps() {
-  info "Updating package lists..."
-  apt-get update -y >> "$LOG_FILE" 2>&1
-  info "Installing base dependencies..."
-  apt-get install -y \
+  run "Updating package lists" apt-get update -y
+  run "Installing base dependencies" apt-get install -y \
     curl wget tar git zip unzip \
     ca-certificates gnupg lsb-release \
-    apt-transport-https software-properties-common \
-    >> "$LOG_FILE" 2>&1
-  success "Base dependencies ready"
+    apt-transport-https software-properties-common
 }
 
 ###############################################################################
@@ -119,12 +174,24 @@ bootstrap_deps() {
 ###############################################################################
 
 validate_email() {
-  [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+  [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
 validate_fqdn() {
   [[ "$1" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || \
   [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+validate_url() {
+  [[ "$1" =~ ^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(:[0-9]+)?(/.*)?$ ]]
+}
+
+validate_token() {
+  [[ "$1" =~ ^ptla_[a-zA-Z0-9]{32,}$ ]]
+}
+
+validate_node_id() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
 }
 
 ###############################################################################
@@ -292,15 +359,12 @@ panel_add_php_repo() {
 }
 
 panel_install_deps() {
-  info "Installing PHP 8.3, MariaDB, NGINX, Redis"
-  apt-get install -y \
+  run "Installing PHP 8.3, MariaDB, NGINX, Redis" apt-get install -y \
     php8.3 php8.3-cli php8.3-common php8.3-gd \
     php8.3-mysql php8.3-mbstring php8.3-bcmath \
     php8.3-xml php8.3-fpm php8.3-curl php8.3-zip \
     mariadb-server mariadb-client \
-    nginx redis-server \
-    >> "$LOG_FILE" 2>&1
-  success "Dependencies installed"
+    nginx redis-server
 }
 
 panel_enable_services() {
@@ -314,8 +378,7 @@ panel_enable_services() {
 }
 
 panel_firewall() {
-  info "Configuring UFW firewall..."
-  apt-get install -y ufw >> "$LOG_FILE" 2>&1
+  run "Configuring UFW firewall" apt-get install -y ufw
   ufw allow 22  >> "$LOG_FILE" 2>&1
   ufw allow 80  >> "$LOG_FILE" 2>&1
   ufw allow 443 >> "$LOG_FILE" 2>&1
@@ -324,15 +387,11 @@ panel_firewall() {
 }
 
 panel_install_composer() {
-  info "Installing Composer"
-  curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php >> "$LOG_FILE" 2>&1
-  php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer >> "$LOG_FILE" 2>&1
-  rm -f /tmp/composer-setup.php
+  run "Installing Composer" bash -c "curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php && php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer && rm -f /tmp/composer-setup.php"
   if ! /usr/local/bin/composer --version >> "$LOG_FILE" 2>&1; then
     error "Composer installation failed."
     exit 1
   fi
-  success "Composer installed"
 }
 
 panel_setup_db() {
@@ -356,35 +415,20 @@ panel_download() {
     exit 1
   fi
 
-  info "Downloading Pterodactyl Panel ${PANEL_VER}"
-  mkdir -p /var/www/pterodactyl
-  cd /var/www/pterodactyl
-
-  curl -fsSL "https://github.com/pterodactyl/panel/releases/download/${PANEL_VER}/panel.tar.gz" \
-    -o panel.tar.gz >> "$LOG_FILE" 2>&1
-  tar -xzf panel.tar.gz >> "$LOG_FILE" 2>&1
-  rm -f panel.tar.gz
-  chmod -R 755 storage/* bootstrap/cache/
-  cp .env.example .env
-  success "Panel ${PANEL_VER} downloaded"
+  run "Downloading Pterodactyl Panel ${PANEL_VER}" bash -c "mkdir -p /var/www/pterodactyl && cd /var/www/pterodactyl && curl -fsSL https://github.com/pterodactyl/panel/releases/download/${PANEL_VER}/panel.tar.gz -o panel.tar.gz && tar -xzf panel.tar.gz && rm -f panel.tar.gz && chmod -R 755 storage/* bootstrap/cache/ && cp .env.example .env"
 }
 
 panel_composer_deps() {
   cd /var/www/pterodactyl
-  info "Installing Composer dependencies (this can take 3-5 minutes)"
-  # --no-progress prevents the animated progress bar which garbles the spinner
-  # We show individual package lines via tee so the log has detail
-  COMPOSER_ALLOW_SUPERUSER=1 /usr/local/bin/composer install \
+  run "Installing Composer dependencies (this can take 3-5 minutes)" COMPOSER_ALLOW_SUPERUSER=1 /usr/local/bin/composer install \
     --no-dev \
     --optimize-autoloader \
     --no-interaction \
-    --no-progress \
-    >> "$LOG_FILE" 2>&1
+    --no-progress
   if [ ! -f /var/www/pterodactyl/vendor/autoload.php ]; then
     error "Composer failed — vendor/autoload.php missing. Check: $LOG_FILE"
     exit 1
   fi
-  success "Composer dependencies installed"
 }
 
 panel_configure() {
@@ -585,8 +629,6 @@ panel_ssl() {
 
   if [ "$FAILED" == true ] || [ ! -d "/etc/letsencrypt/live/${PANEL_FQDN}/" ]; then
     warn "Let's Encrypt failed — panel is accessible via HTTP only."
-    warn "Make sure your domain points to this server and port 80 is open."
-    PANEL_LETSENCRYPT=false
   else
     systemctl restart nginx >> "$LOG_FILE" 2>&1
     success "SSL certificate obtained"
@@ -655,6 +697,33 @@ collect_wings_inputs() {
     validate_fqdn "$WINGS_FQDN" && break || error "Invalid domain or IP. Try again."
   done
 
+  # New inputs for wings configure
+  echo -e ""
+  echo -e "  ${BOLD}Wings Auto-Configuration (from Panel)${NC}"
+  echo -e "  ${DIM}This requires creating a Node in your Panel *first*.${NC}"
+  echo -e "  ${DIM}Go to Panel -> Admin -> Nodes -> Create New, then get these details.${NC}"
+  echo -e ""
+
+  while true; do
+    echo -n -e "  ${WHITE}Panel URL (e.g., https://panel.yourdomain.com):${NC} "
+    read -r PANEL_URL_FOR_WINGS
+    validate_url "$PANEL_URL_FOR_WINGS" && break || error "Invalid Panel URL. Must start with http(s):// and be a valid domain/IP."
+  done
+
+  while true; do
+    echo -n -e "  ${WHITE}Application API Key (ptla_...):${NC} "
+    read -r WINGS_API_TOKEN
+    validate_token "$WINGS_API_TOKEN" && break || error "Invalid API Token. Must start with ptla_ and be at least 32 characters."
+  done
+
+  while true; do
+    echo -n -e "  ${WHITE}Node ID (e.g., 3):${NC} "
+    read -r WINGS_NODE_ID
+    validate_node_id "$WINGS_NODE_ID" && break || error "Invalid Node ID. Must be a positive integer."
+  done
+  # End new inputs for wings configure
+
+  echo -e ""
   while true; do
     echo -n -e "  ${WHITE}Install MariaDB (for database host feature)? [y/N]:${NC} "
     read -r DB_INPUT
@@ -713,6 +782,8 @@ collect_wings_inputs() {
   echo -e "  ${BOLD}Summary — Wings${NC}"
   echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e "  FQDN/IP   : ${WHITE}${WINGS_FQDN}${NC}"
+  echo -e "  Panel URL : ${WHITE}${PANEL_URL_FOR_WINGS}${NC}"
+  echo -e "  Node ID   : ${WHITE}${WINGS_NODE_ID}${NC}"
   echo -e "  MariaDB   : ${WHITE}$([ "$WINGS_INSTALL_DB" == true ] && echo "Yes" || echo "No")${NC}"
   echo -e "  SSL       : ${WHITE}$([ "$WINGS_LETSENCRYPT" == true ] && echo "Let's Encrypt" || echo "None")${NC}"
   echo -e "  Firewall  : ${WHITE}$([ "$WINGS_FIREWALL" == true ] && echo "Yes" || echo "No")${NC}"
@@ -736,8 +807,7 @@ collect_wings_inputs() {
 ###############################################################################
 
 wings_firewall() {
-  info "Configuring UFW firewall..."
-  apt-get install -y ufw >> "$LOG_FILE" 2>&1
+  run "Configuring UFW firewall" apt-get install -y ufw
   ufw allow 22   >> "$LOG_FILE" 2>&1
   ufw allow 8080 >> "$LOG_FILE" 2>&1
   ufw allow 2022 >> "$LOG_FILE" 2>&1
@@ -749,49 +819,35 @@ wings_firewall() {
 }
 
 wings_install_docker() {
-  info "Installing Docker"
-  apt-get remove -y docker docker-engine docker.io containerd runc >> "$LOG_FILE" 2>&1 || true
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL "https://download.docker.com/linux/${OS}/gpg" \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg >> "$LOG_FILE" 2>&1
-  chmod a+r /etc/apt/keyrings/docker.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/${OS} $(lsb_release -cs) stable" \
-    > /etc/apt/sources.list.d/docker.list
-  apt-get update -y >> "$LOG_FILE" 2>&1
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
-    >> "$LOG_FILE" 2>&1
-  systemctl enable --now docker >> "$LOG_FILE" 2>&1
+  run "Installing Docker" bash -c "apt-get remove -y docker docker-engine docker.io containerd runc >> \"$LOG_FILE\" 2>&1 || true && mkdir -p /etc/apt/keyrings && curl -fsSL https://download.docker.com/linux/${OS}/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg >> \"$LOG_FILE\" 2>&1 && chmod a+r /etc/apt/keyrings/docker.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${OS} $(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list && apt-get update -y >> \"$LOG_FILE\" 2>&1 && apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >> \"$LOG_FILE\" 2>&1 && systemctl enable --now docker >> \"$LOG_FILE\" 2>&1"
   if ! docker info >> "$LOG_FILE" 2>&1; then
     error "Docker installed but failed to start."
     exit 1
   fi
-  success "Docker installed and running"
 }
 
 wings_install_mariadb() {
-  info "Installing MariaDB for database host feature..."
-  apt-get install -y mariadb-server >> "$LOG_FILE" 2>&1
+  run "Installing MariaDB for database host feature" apt-get install -y mariadb-server
   systemctl enable --now mariadb >> "$LOG_FILE" 2>&1
 
+  info "Creating 'pterodactyluser' for MariaDB..."
   mysql -u root << SQL >> "$LOG_FILE" 2>&1
 CREATE USER IF NOT EXISTS 'pterodactyluser'@'%' IDENTIFIED BY '${WINGS_DB_PASSWORD}';
 GRANT ALL PRIVILEGES ON *.* TO 'pterodactyluser'@'%' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 SQL
 
-  # Allow remote connections
+  info "Allowing remote connections for MariaDB..."
   sed -i 's/^bind-address\s*=.*/bind-address = 0.0.0.0/' \
     /etc/mysql/mariadb.conf.d/50-server.cnf 2>/dev/null || true
   systemctl restart mariadb >> "$LOG_FILE" 2>&1
-  success "MariaDB installed, user 'pterodactyluser' created"
+  success "MariaDB installed, user 'pterodactyluser' created and remote connections allowed."
 }
 
 wings_download() {
   info "Downloading Pterodactyl Wings (latest)..."
   mkdir -p /etc/pterodactyl
 
-  # Detect architecture with multiple fallback methods
   local raw_arch
   raw_arch="$(uname -m)"
   case "$raw_arch" in
@@ -801,7 +857,6 @@ wings_download() {
   esac
   info "Detected architecture: $raw_arch → wings_linux_${ARCH}"
 
-  # Fetch latest version — with fallback if GitHub API rate-limits
   WINGS_VER=$(curl -fsSL https://api.github.com/repos/pterodactyl/wings/releases/latest \
     | grep '"tag_name"' | cut -d'"' -f4)
 
@@ -820,15 +875,11 @@ wings_download() {
   local WINGS_URL="https://github.com/pterodactyl/wings/releases/download/${WINGS_VER}/wings_linux_${ARCH}"
   info "Download URL: $WINGS_URL"
 
-  info "Downloading Wings ${WINGS_VER} (${ARCH})"
-  # Download to a temp file first so we can check it before installing
-  curl -fsSL "$WINGS_URL" -o /tmp/wings_download >> "$LOG_FILE" 2>&1
+  run "Downloading Wings ${WINGS_VER} (${ARCH})" curl -fsSL "$WINGS_URL" -o /tmp/wings_download
 
-  # Check the downloaded file is actually an ELF binary, not an HTML error page
   local file_type
   file_type="$(file /tmp/wings_download 2>/dev/null || true)"
   info "Downloaded file type: $file_type" >> "$LOG_FILE" 2>&1 || true
-  echo "Downloaded file type: $file_type" >> "$LOG_FILE"
 
   if echo "$file_type" | grep -qiE "HTML|ASCII text|empty"; then
     error "Downloaded file is not a binary (got HTML/text — likely a 404 or GitHub error)."
@@ -841,9 +892,7 @@ wings_download() {
   mv /tmp/wings_download /usr/local/bin/wings
   chmod +x /usr/local/bin/wings
 
-  # Test execution - FIXED: Use 'version' subcommand instead of '--version' flag
   if ! /usr/local/bin/wings version >> "$LOG_FILE" 2>&1; then
-    # Get the actual error message for diagnosis
     local exec_err
     exec_err=$(/usr/local/bin/wings version 2>&1 || true)
     error "Wings binary failed to execute: $exec_err"
@@ -851,8 +900,6 @@ wings_download() {
     error "Your machine reports: $raw_arch"
     exit 1
   fi
-
-  success "Wings ${WINGS_VER} (${ARCH}) downloaded and verified"
 }
 
 wings_service() {
@@ -880,12 +927,42 @@ WantedBy=multi-user.target
 SERVICE
   systemctl daemon-reload        >> "$LOG_FILE" 2>&1
   systemctl enable wings         >> "$LOG_FILE" 2>&1
-  success "Wings service installed (will start after config.yml is placed)"
+  success "Wings service installed."
 }
+
+wings_auto_configure() {
+  info "Attempting to auto-configure Wings using provided Panel details..."
+  # Ensure the directory exists
+  mkdir -p /etc/pterodactyl
+
+  # Remove any existing config.yml to ensure a fresh one is written
+  rm -f /etc/pterodactyl/config.yml
+
+  if cd /etc/pterodactyl && /usr/local/bin/wings configure \
+    --panel-url "${PANEL_URL_FOR_WINGS}" \
+    --token "${WINGS_API_TOKEN}" \
+    --node "${WINGS_NODE_ID}" >> "$LOG_FILE" 2>&1; then
+    success "Wings successfully configured (config.yml created)."
+    # Attempt to start Wings immediately if configured successfully
+    info "Starting Wings service..."
+    if systemctl start wings >> "$LOG_FILE" 2>&1; then
+      success "Wings service started successfully!"
+    else
+      warn "Wings service failed to start automatically after configuration. Check logs manually."
+      warn "Run: journalctl -u wings -n 50 --no-pager"
+    fi
+  else
+    error "Wings auto-configuration FAILED. config.yml was NOT created."
+    error "This usually means incorrect Panel URL, Token, or Node ID."
+    error "Please check the values and ensure your Panel is accessible."
+    error "You will need to manually configure Wings (generate config.yml from Panel and place it)."
+  fi
+}
+
 
 wings_ssl() {
   info "Obtaining Let's Encrypt certificate for ${WINGS_FQDN}..."
-  apt-get install -y certbot >> "$LOG_FILE" 2>&1
+  run "Installing Certbot" apt-get install -y certbot
 
   local FAILED=false
   certbot certonly --standalone --no-eff-email \
@@ -912,16 +989,16 @@ wings_print_done() {
   [ "$WINGS_LETSENCRYPT" == true ] && echo -e "  ${WHITE}:443 ${NC} — HTTPS Wings API (SSL)"
   [ "$WINGS_INSTALL_DB"  == true ] && echo -e "  ${WHITE}:3306${NC} — MariaDB (database host)"
   echo -e ""
-  echo -e "  ${BOLD}${RED}★★★ IMPORTANT NEXT STEPS FOR WINGS! ★★★${NC}"
-  echo -e "  1. Go to your Panel → ${WHITE}Admin → Nodes → Create Node${NC}"
-  echo -e "  2. Fill in node details (using your public Wings domain, e.g., wings.yourdomain.com)"
-  echo -e "  3. Open the ${WHITE}Configuration${NC} tab and ${CYAN}${BOLD}COPY THE ENTIRE YAML BLOCK${NC}"
-  echo -e "  4. On this server, create the Wings config file:"
-  echo -e "     ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
-  echo -e "  5. ${CYAN}${BOLD}PASTE THE COPIED YAML INTO THE FILE and SAVE IT.${NC}"
-  echo -e "  6. Then, start Wings: ${CYAN}systemctl start wings${NC}"
-  echo -e "  7. Verify its status: ${CYAN}systemctl status wings${NC}"
-  echo -e "     If it's still failing, check logs: ${CYAN}journalctl -u wings -n 50 --no-pager${NC}"
+  echo -e "  ${BOLD}${GREEN}✔ If auto-configuration succeeded, Wings should be running!${NC}"
+  echo -e "  ${BOLD}Verify status with: ${CYAN}systemctl status wings${NC}"
+  echo -e "  ${BOLD}Check logs for details: ${CYAN}journalctl -u wings -n 50 --no-pager${NC}"
+  echo -e ""
+  echo -e "  ${BOLD}${YELLOW}Important Manual Steps (ONLY if auto-configuration failed):${NC}"
+  echo -e "  1. In Panel: Go to Admin -> Nodes -> Your Node -> Configuration tab."
+  echo -e "  2. ${CYAN}${BOLD}Manually copy the entire YAML config block.${NC}"
+  echo -e "  3. On this server, edit: ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
+  echo -e "  4. ${CYAN}${BOLD}Paste the YAML and save the file.${NC}"
+  echo -e "  5. Then start Wings: ${CYAN}systemctl start wings${NC}"
   echo -e ""
   if [ "$WINGS_INSTALL_DB" == true ]; then
     echo -e "  ${BOLD}DB Host User :${NC} ${WHITE}pterodactyluser${NC}"
@@ -941,6 +1018,7 @@ install_wings() {
   [ "$WINGS_INSTALL_DB" == true ] && wings_install_mariadb
   wings_download
   wings_service
+  wings_auto_configure # New step to attempt auto-configuration and start Wings
   [ "$WINGS_LETSENCRYPT" == true ] && wings_ssl
   wings_print_done
 }
@@ -976,5 +1054,139 @@ run_uninstall() {
       [Yy]*) RM_WINGS=true;  break ;;
       [Nn]*|"") RM_WINGS=false; break ;;
       *) error "Enter y or n." ;;
-    </dev/fd/63: line 649: unexpected EOF while looking for matching `"'`
-/dev/fd/63: line 650: syntax error: unexpected end of file
+    esac
+  done
+
+  if [ "$RM_PANEL" == false ] && [ "$RM_WINGS" == false ]; then
+    warn "Nothing selected. Exiting."
+    exit 0
+  fi
+
+  echo -e ""
+  echo -e "  ${RED}${BOLD}⚠  This is IRREVERSIBLE.${NC}"
+  echo -e "  Remove Panel : ${WHITE}$([ "$RM_PANEL" == true ] && echo "YES" || echo "No")${NC}"
+  echo -e "  Remove Wings : ${WHITE}$([ "$RM_WINGS" == true ] && echo "YES" || echo "No")${NC}"
+  echo -e ""
+
+  while true; do
+    echo -n -e "  ${RED}Type 'yes' to confirm:${NC} "
+    read -r CONFIRM
+    [ "$CONFIRM" == "yes" ] && break
+    error "Type exactly 'yes' to confirm, or press Ctrl+C to cancel."
+  done
+  echo -e ""
+
+  if [ "$RM_PANEL" == true ]; then
+    info "Stopping Panel services..."
+    systemctl disable --now pteroq    >> "$LOG_FILE" 2>&1 || true
+    systemctl disable --now redis-server >> "$LOG_FILE" 2>&1 || true
+
+    info "Removing Panel files..."
+    rm -rf /var/www/pterodactyl /usr/local/bin/composer
+
+    info "Removing NGINX config..."
+    rm -f /etc/nginx/sites-enabled/pterodactyl.conf \
+          /etc/nginx/sites-available/pterodactyl.conf 2>/dev/null || true
+    systemctl restart nginx >> "$LOG_FILE" 2>&1 || true
+
+    info "Removing cron job..."
+    (crontab -l 2>/dev/null | grep -v "pterodactyl/artisan schedule:run") | crontab - 2>/dev/null || true
+
+    info "Removing pteroq service..."
+    rm -f /etc/systemd/system/pteroq.service
+    systemctl daemon-reload >> "$LOG_FILE" 2>&1
+
+    info "Removing database..."
+    local valid_db
+    valid_db=$(mysql -u root -e \
+      "SELECT schema_name FROM information_schema.schemata;" 2>/dev/null \
+      | grep -v -E 'schema_name|information_schema|performance_schema|mysql|sys' || true)
+
+    if [[ -n "$valid_db" ]]; then
+      local DATABASE=""
+      if echo "$valid_db" | grep -q "^panel$"; then
+        echo -n -e "  ${WHITE}Remove database 'panel'? [y/N]:${NC} "
+        read -r CONFIRM_DB
+        [[ "$CONFIRM_DB" =~ [Yy] ]] && DATABASE="panel"
+      else
+        echo -e "  Found databases: ${WHITE}${valid_db}${NC}"
+        echo -n -e "  ${WHITE}Enter database name to remove (blank to skip):${NC} "
+        read -r DATABASE
+      fi
+      if [[ -n "$DATABASE" ]]; then
+        mysql -u root -e "DROP DATABASE IF EXISTS \`${DATABASE}\`;" >> "$LOG_FILE" 2>&1 || true
+        mysql -u root -e "DROP USER IF EXISTS 'pterodactyl'@'127.0.0.1';" >> "$LOG_FILE" 2>&1 || true
+        mysql -u root -e "FLUSH PRIVILEGES;" >> "$LOG_FILE" 2>&1 || true
+        success "Database and user removed"
+      fi
+    else
+      info "No removable databases found"
+    fi
+
+    success "Panel removed"
+  fi
+
+  if [ "$RM_WINGS" == true ]; then
+    info "Stopping Wings..."
+    systemctl disable --now wings >> "$LOG_FILE" 2>&1 || true
+
+    info "Removing Docker containers and images..."
+    if command -v docker &>/dev/null; then
+      docker system prune -a -f >> "$LOG_FILE" 2>&1 || true
+    fi
+
+    info "Removing Wings files and service..."
+    rm -f /etc/systemd/system/wings.service
+    rm -f /usr/local/bin/wings
+    rm -rf /etc/pterodactyl /var/lib/pterodactyl
+    systemctl daemon-reload >> "$LOG_FILE" 2>&1
+
+    success "Wings removed"
+  fi
+
+  echo -e ""
+  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "  ${GREEN}${BOLD}✓ Uninstall Complete${NC}"
+  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "  ${DIM}PHP, NGINX, MariaDB, Redis, Docker were NOT removed.${NC}"
+  echo -e "  ${DIM}Remove them manually if no longer needed.${NC}"
+  echo -e ""
+}
+
+###############################################################################
+# ENTRY POINT
+###############################################################################
+
+main() {
+  # Ensure log file exists and is writable
+  mkdir -p "$(dirname "$LOG_FILE")"
+  touch "$LOG_FILE"
+  echo "=== Pterodactyl Installer by XENTO — $(date) ===" >> "$LOG_FILE"
+
+  print_header
+  require_root
+  detect_os
+  bootstrap_deps
+
+  main_menu
+
+  case "$MENU_CHOICE" in
+    1) install_panel ;;
+    2) install_wings ;;
+    3)
+      install_panel
+      echo -e ""
+      echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+      info "Panel done. Now installing Wings on the same machine..."
+      echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+      echo -e ""
+      install_wings
+      ;;
+    4) run_uninstall ;;
+  esac
+
+  echo -e "  ${DIM}Installer by XENTO — https://github.com/thexento/Pterodactyl-Installer${NC}"
+  echo -e ""
+}
+
+main "$@"
