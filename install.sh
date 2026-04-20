@@ -380,7 +380,7 @@ panel_composer_deps() {
   info "Installing Composer dependencies (this may take a few minutes)..."
   cd /var/www/pterodactyl
   COMPOSER_ALLOW_SUPERUSER=1 composer install \
-    --no-dev --optimize-autoloader --no-interaction &>>"$LOG_FILE"
+    --no-dev --optimize-autoloader --no-interaction 2>&1 | tee -a "$LOG_FILE"
   success "Composer dependencies installed"
 }
 
@@ -389,11 +389,13 @@ panel_configure() {
   cd /var/www/pterodactyl
 
   local app_url="http://${PANEL_FQDN}"
-  [ "$PANEL_ASSUME_SSL"    == true ] && app_url="https://${PANEL_FQDN}"
-  [ "$PANEL_LETSENCRYPT"   == true ] && app_url="https://${PANEL_FQDN}"
+  [ "$PANEL_ASSUME_SSL"  == true ] && app_url="https://${PANEL_FQDN}"
+  [ "$PANEL_LETSENCRYPT" == true ] && app_url="https://${PANEL_FQDN}"
 
-  php artisan key:generate --force &>>"$LOG_FILE"
+  info "Generating application key..."
+  php artisan key:generate --force 2>&1 | tee -a "$LOG_FILE"
 
+  info "Writing environment config..."
   php artisan p:environment:setup \
     --author="${ADMIN_EMAIL}" \
     --url="${app_url}" \
@@ -406,8 +408,9 @@ panel_configure() {
     --redis-port="6379" \
     --settings-ui=true \
     --no-interaction \
-    &>>"$LOG_FILE"
+    2>&1 | tee -a "$LOG_FILE"
 
+  info "Writing database config..."
   php artisan p:environment:database \
     --host="127.0.0.1" \
     --port="3306" \
@@ -415,10 +418,12 @@ panel_configure() {
     --username="${MYSQL_USER}" \
     --password="${MYSQL_PASSWORD}" \
     --no-interaction \
-    &>>"$LOG_FILE"
+    2>&1 | tee -a "$LOG_FILE"
 
-  php artisan migrate --seed --force &>>"$LOG_FILE"
+  info "Running database migrations (this may take a moment)..."
+  php artisan migrate --seed --force 2>&1 | tee -a "$LOG_FILE"
 
+  info "Creating admin user..."
   php artisan p:user:make \
     --email="${ADMIN_EMAIL}" \
     --username="${ADMIN_USERNAME}" \
@@ -427,7 +432,7 @@ panel_configure() {
     --password="${ADMIN_PASSWORD}" \
     --admin=1 \
     --no-interaction \
-    &>>"$LOG_FILE"
+    2>&1 | tee -a "$LOG_FILE"
 
   chown -R www-data:www-data /var/www/pterodactyl
   success "Panel configured and admin user created"
@@ -579,8 +584,9 @@ panel_ssl() {
 
 panel_print_done() {
   local proto="http"
-  [ "$PANEL_LETSENCRYPT" == true ] && proto="https"
-  [ "$PANEL_ASSUME_SSL"  == true ] && proto="https"
+  local panel_port="80"
+  [ "$PANEL_LETSENCRYPT" == true ] && proto="https" && panel_port="443"
+  [ "$PANEL_ASSUME_SSL"  == true ] && proto="https" && panel_port="443"
 
   echo -e ""
   echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -588,9 +594,14 @@ panel_print_done() {
   echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e ""
   echo -e "  ${BOLD}Panel URL   :${NC} ${CYAN}${proto}://${PANEL_FQDN}${NC}"
+  echo -e "  ${BOLD}Panel Port  :${NC} ${WHITE}:${panel_port}${NC}"
   echo -e "  ${BOLD}Username    :${NC} ${WHITE}${ADMIN_USERNAME}${NC}"
   echo -e "  ${BOLD}Email       :${NC} ${WHITE}${ADMIN_EMAIL}${NC}"
   echo -e "  ${BOLD}DB Password :${NC} ${WHITE}${MYSQL_PASSWORD}${NC}"
+  echo -e ""
+  echo -e "  ${DIM}Ports used:${NC}"
+  echo -e "  ${WHITE}:80${NC}   HTTP web (redirects to HTTPS if SSL enabled)"
+  echo -e "  ${WHITE}:443${NC}  HTTPS web (if SSL enabled)"
   echo -e ""
 }
 
@@ -829,6 +840,16 @@ wings_print_done() {
   echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e "  ${GREEN}${BOLD}✓ Wings Installation Complete!${NC}"
   echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e ""
+  echo -e "  ${BOLD}Ports used:${NC}"
+  echo -e "  ${WHITE}:8080${NC}  Wings API (Panel communicates with node here)"
+  echo -e "  ${WHITE}:2022${NC}  SFTP (file transfers to/from game servers)"
+  if [ "$WINGS_LETSENCRYPT" == true ]; then
+    echo -e "  ${WHITE}:443${NC}   HTTPS Wings API (SSL enabled)"
+  fi
+  if [ "$WINGS_INSTALL_DB" == true ]; then
+    echo -e "  ${WHITE}:3306${NC}  MariaDB (database host feature)"
+  fi
   echo -e ""
   echo -e "  ${BOLD}Next steps:${NC}"
   echo -e "  1. Log in to your Panel"
