@@ -1,5 +1,3 @@
---- START OF FILE Paste April 20, 2026 - 10:03AM ---
-
 #!/bin/bash
 
 ######################################################################################
@@ -39,66 +37,6 @@ info()    { echo -e "${CYAN}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
 success() { echo -e "${GREEN}[ OK ]${NC}  $*" | tee -a "$LOG_FILE"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[ERR ]${NC}  $*" | tee -a "$LOG_FILE"; }
-
-###############################################################################
-# SPINNER — shows animated spinner + elapsed time for long-running steps
-###############################################################################
-
-SPIN_PID=""
-
-spin_start() {
-  local msg="$*"
-  echo "[SPIN] $msg" >> "$LOG_FILE"
-  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  (
-    local i=0 elapsed=0 progress_char='█' total_width=20
-    while true; do
-      local frame="${frames[$((i % 10))]}"
-      local mins=$(( elapsed / 60 ))
-      local secs=$(( elapsed % 60 ))
-
-      # Simple "loading bar" that grows with time
-      local progress_len=$(( (elapsed % total_width) + 1 ))
-      local progress_bar=$(printf "%-${total_width}s" | sed "s/ /${progress_char}/g; s/${progress_char}\{${progress_len}\}/$(printf "%${progress_len}s" | sed "s/ /${GREEN}${progress_char}${NC}/g")/")
-
-      printf "\r  \033[1;36m%s\033[0m  %s  %s  \033[2m[%02d:%02d]\033[0m   " \
-        "$frame" "$msg" "$progress_bar" "$mins" "$secs"
-      sleep 1
-      (( i++ )) || true
-      (( elapsed++ )) || true
-    done
-  ) &
-  SPIN_PID=$!
-  disown "$SPIN_PID" 2>/dev/null || true
-}
-
-spin_stop() {
-  if [[ -n "$SPIN_PID" ]]; then
-    kill "$SPIN_PID" 2>/dev/null || true
-    wait "$SPIN_PID" 2>/dev/null || true
-    SPIN_PID=""
-  fi
-  printf "\r%-80s\r" " "
-}
-
-# Make sure spinner is killed if the script exits unexpectedly
-trap 'spin_stop' EXIT INT TERM
-
-# Run a command, show output live, log it, and abort with a clear message on failure
-run() {
-  local desc="$1"; shift
-  info "$desc"
-  if ! "$@" 2>&1 | tee -a "$LOG_FILE"; then
-    error "FAILED: $desc"
-    error "Check the log: $LOG_FILE"
-    exit 1
-  fi
-}
-
-# Silent run — log only, no live output (for quick non-critical steps)
-run_q() {
-  "$@" >> "$LOG_FILE" 2>&1 || true
-}
 
 ###############################################################################
 # HEADER
@@ -354,7 +292,7 @@ panel_add_php_repo() {
 }
 
 panel_install_deps() {
-  spin_start "Installing PHP 8.3, MariaDB, NGINX, Redis"
+  info "Installing PHP 8.3, MariaDB, NGINX, Redis"
   apt-get install -y \
     php8.3 php8.3-cli php8.3-common php8.3-gd \
     php8.3-mysql php8.3-mbstring php8.3-bcmath \
@@ -362,7 +300,6 @@ panel_install_deps() {
     mariadb-server mariadb-client \
     nginx redis-server \
     >> "$LOG_FILE" 2>&1
-  spin_stop
   success "Dependencies installed"
 }
 
@@ -387,11 +324,10 @@ panel_firewall() {
 }
 
 panel_install_composer() {
-  spin_start "Installing Composer"
+  info "Installing Composer"
   curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php >> "$LOG_FILE" 2>&1
   php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer >> "$LOG_FILE" 2>&1
   rm -f /tmp/composer-setup.php
-  spin_stop
   if ! /usr/local/bin/composer --version >> "$LOG_FILE" 2>&1; then
     error "Composer installation failed."
     exit 1
@@ -420,7 +356,7 @@ panel_download() {
     exit 1
   fi
 
-  spin_start "Downloading Pterodactyl Panel ${PANEL_VER}"
+  info "Downloading Pterodactyl Panel ${PANEL_VER}"
   mkdir -p /var/www/pterodactyl
   cd /var/www/pterodactyl
 
@@ -430,13 +366,12 @@ panel_download() {
   rm -f panel.tar.gz
   chmod -R 755 storage/* bootstrap/cache/
   cp .env.example .env
-  spin_stop
   success "Panel ${PANEL_VER} downloaded"
 }
 
 panel_composer_deps() {
   cd /var/www/pterodactyl
-  spin_start "Installing Composer dependencies (this can take 3-5 minutes)"
+  info "Installing Composer dependencies (this can take 3-5 minutes)"
   # --no-progress prevents the animated progress bar which garbles the spinner
   # We show individual package lines via tee so the log has detail
   COMPOSER_ALLOW_SUPERUSER=1 /usr/local/bin/composer install \
@@ -445,7 +380,6 @@ panel_composer_deps() {
     --no-interaction \
     --no-progress \
     >> "$LOG_FILE" 2>&1
-  spin_stop
   if [ ! -f /var/www/pterodactyl/vendor/autoload.php ]; then
     error "Composer failed — vendor/autoload.php missing. Check: $LOG_FILE"
     exit 1
@@ -488,9 +422,8 @@ panel_configure() {
     --no-interaction \
     2>&1 | tee -a "$LOG_FILE"
 
-  spin_start "Running database migrations"
+  info "Running database migrations"
   php artisan migrate --seed --force >> "$LOG_FILE" 2>&1
-  spin_stop
   success "Migrations complete"
 
   info "Creating admin user..."
@@ -816,7 +749,7 @@ wings_firewall() {
 }
 
 wings_install_docker() {
-  spin_start "Installing Docker"
+  info "Installing Docker"
   apt-get remove -y docker docker-engine docker.io containerd runc >> "$LOG_FILE" 2>&1 || true
   mkdir -p /etc/apt/keyrings
   curl -fsSL "https://download.docker.com/linux/${OS}/gpg" \
@@ -829,7 +762,6 @@ https://download.docker.com/linux/${OS} $(lsb_release -cs) stable" \
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
     >> "$LOG_FILE" 2>&1
   systemctl enable --now docker >> "$LOG_FILE" 2>&1
-  spin_stop
   if ! docker info >> "$LOG_FILE" 2>&1; then
     error "Docker installed but failed to start."
     exit 1
@@ -888,10 +820,9 @@ wings_download() {
   local WINGS_URL="https://github.com/pterodactyl/wings/releases/download/${WINGS_VER}/wings_linux_${ARCH}"
   info "Download URL: $WINGS_URL"
 
-  spin_start "Downloading Wings ${WINGS_VER} (${ARCH})"
+  info "Downloading Wings ${WINGS_VER} (${ARCH})"
   # Download to a temp file first so we can check it before installing
   curl -fsSL "$WINGS_URL" -o /tmp/wings_download >> "$LOG_FILE" 2>&1
-  spin_stop
 
   # Check the downloaded file is actually an ELF binary, not an HTML error page
   local file_type
@@ -981,14 +912,16 @@ wings_print_done() {
   [ "$WINGS_LETSENCRYPT" == true ] && echo -e "  ${WHITE}:443 ${NC} — HTTPS Wings API (SSL)"
   [ "$WINGS_INSTALL_DB"  == true ] && echo -e "  ${WHITE}:3306${NC} — MariaDB (database host)"
   echo -e ""
-  echo -e "  ${BOLD}Next steps:${NC}"
+  echo -e "  ${BOLD}${RED}★★★ IMPORTANT NEXT STEPS FOR WINGS! ★★★${NC}"
   echo -e "  1. Go to your Panel → ${WHITE}Admin → Nodes → Create Node${NC}"
-  echo -e "  2. Fill in node details and save"
-  echo -e "  3. Open the ${WHITE}Configuration${NC} tab and copy the YAML"
-  echo -e "  4. Paste into: ${CYAN}/etc/pterodactyl/config.yml${NC}"
-  echo -e "     ${DIM}(nano /etc/pterodactyl/config.yml)${NC}"
-  echo -e "  5. Start Wings: ${CYAN}systemctl start wings${NC}"
-  echo -e "  6. Verify:      ${CYAN}systemctl status wings${NC}"
+  echo -e "  2. Fill in node details (using your public Wings domain, e.g., wings.yourdomain.com)"
+  echo -e "  3. Open the ${WHITE}Configuration${NC} tab and ${CYAN}${BOLD}COPY THE ENTIRE YAML BLOCK${NC}"
+  echo -e "  4. On this server, create the Wings config file:"
+  echo -e "     ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
+  echo -e "  5. ${CYAN}${BOLD}PASTE THE COPIED YAML INTO THE FILE and SAVE IT.${NC}"
+  echo -e "  6. Then, start Wings: ${CYAN}systemctl start wings${NC}"
+  echo -e "  7. Verify its status: ${CYAN}systemctl status wings${NC}"
+  echo -e "     If it's still failing, check logs: ${CYAN}journalctl -u wings -n 50 --no-pager${NC}"
   echo -e ""
   if [ "$WINGS_INSTALL_DB" == true ]; then
     echo -e "  ${BOLD}DB Host User :${NC} ${WHITE}pterodactyluser${NC}"
@@ -1043,139 +976,5 @@ run_uninstall() {
       [Yy]*) RM_WINGS=true;  break ;;
       [Nn]*|"") RM_WINGS=false; break ;;
       *) error "Enter y or n." ;;
-    esac
-  done
-
-  if [ "$RM_PANEL" == false ] && [ "$RM_WINGS" == false ]; then
-    warn "Nothing selected. Exiting."
-    exit 0
-  fi
-
-  echo -e ""
-  echo -e "  ${RED}${BOLD}⚠  This is IRREVERSIBLE.${NC}"
-  echo -e "  Remove Panel : ${WHITE}$([ "$RM_PANEL" == true ] && echo "YES" || echo "No")${NC}"
-  echo -e "  Remove Wings : ${WHITE}$([ "$RM_WINGS" == true ] && echo "YES" || echo "No")${NC}"
-  echo -e ""
-
-  while true; do
-    echo -n -e "  ${RED}Type 'yes' to confirm:${NC} "
-    read -r CONFIRM
-    [ "$CONFIRM" == "yes" ] && break
-    error "Type exactly 'yes' to confirm, or press Ctrl+C to cancel."
-  done
-  echo -e ""
-
-  if [ "$RM_PANEL" == true ]; then
-    info "Stopping Panel services..."
-    systemctl disable --now pteroq    >> "$LOG_FILE" 2>&1 || true
-    systemctl disable --now redis-server >> "$LOG_FILE" 2>&1 || true
-
-    info "Removing Panel files..."
-    rm -rf /var/www/pterodactyl /usr/local/bin/composer
-
-    info "Removing NGINX config..."
-    rm -f /etc/nginx/sites-enabled/pterodactyl.conf \
-          /etc/nginx/sites-available/pterodactyl.conf 2>/dev/null || true
-    systemctl restart nginx >> "$LOG_FILE" 2>&1 || true
-
-    info "Removing cron job..."
-    (crontab -l 2>/dev/null | grep -v "pterodactyl/artisan schedule:run") | crontab - 2>/dev/null || true
-
-    info "Removing pteroq service..."
-    rm -f /etc/systemd/system/pteroq.service
-    systemctl daemon-reload >> "$LOG_FILE" 2>&1
-
-    info "Removing database..."
-    local valid_db
-    valid_db=$(mysql -u root -e \
-      "SELECT schema_name FROM information_schema.schemata;" 2>/dev/null \
-      | grep -v -E 'schema_name|information_schema|performance_schema|mysql|sys' || true)
-
-    if [[ -n "$valid_db" ]]; then
-      local DATABASE=""
-      if echo "$valid_db" | grep -q "^panel$"; then
-        echo -n -e "  ${WHITE}Remove database 'panel'? [y/N]:${NC} "
-        read -r CONFIRM_DB
-        [[ "$CONFIRM_DB" =~ [Yy] ]] && DATABASE="panel"
-      else
-        echo -e "  Found databases: ${WHITE}${valid_db}${NC}"
-        echo -n -e "  ${WHITE}Enter database name to remove (blank to skip):${NC} "
-        read -r DATABASE
-      fi
-      if [[ -n "$DATABASE" ]]; then
-        mysql -u root -e "DROP DATABASE IF EXISTS \`${DATABASE}\`;" >> "$LOG_FILE" 2>&1 || true
-        mysql -u root -e "DROP USER IF EXISTS 'pterodactyl'@'127.0.0.1';" >> "$LOG_FILE" 2>&1 || true
-        mysql -u root -e "FLUSH PRIVILEGES;" >> "$LOG_FILE" 2>&1 || true
-        success "Database and user removed"
-      fi
-    else
-      info "No removable databases found"
-    fi
-
-    success "Panel removed"
-  fi
-
-  if [ "$RM_WINGS" == true ]; then
-    info "Stopping Wings..."
-    systemctl disable --now wings >> "$LOG_FILE" 2>&1 || true
-
-    info "Removing Docker containers and images..."
-    if command -v docker &>/dev/null; then
-      docker system prune -a -f >> "$LOG_FILE" 2>&1 || true
-    fi
-
-    info "Removing Wings files and service..."
-    rm -f /etc/systemd/system/wings.service
-    rm -f /usr/local/bin/wings
-    rm -rf /etc/pterodactyl /var/lib/pterodactyl
-    systemctl daemon-reload >> "$LOG_FILE" 2>&1
-
-    success "Wings removed"
-  fi
-
-  echo -e ""
-  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  echo -e "  ${GREEN}${BOLD}✓ Uninstall Complete${NC}"
-  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  echo -e "  ${DIM}PHP, NGINX, MariaDB, Redis, Docker were NOT removed.${NC}"
-  echo -e "  ${DIM}Remove them manually if no longer needed.${NC}"
-  echo -e ""
-}
-
-###############################################################################
-# ENTRY POINT
-###############################################################################
-
-main() {
-  # Ensure log file exists and is writable
-  mkdir -p "$(dirname "$LOG_FILE")"
-  touch "$LOG_FILE"
-  echo "=== Pterodactyl Installer by XENTO — $(date) ===" >> "$LOG_FILE"
-
-  print_header
-  require_root
-  detect_os
-  bootstrap_deps
-
-  main_menu
-
-  case "$MENU_CHOICE" in
-    1) install_panel ;;
-    2) install_wings ;;
-    3)
-      install_panel
-      echo -e ""
-      echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-      info "Panel done. Now installing Wings on the same machine..."
-      echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-      echo -e ""
-      install_wings
-      ;;
-    4) run_uninstall ;;
-  esac
-
-  echo -e "  ${DIM}Installer by XENTO — https://github.com/thexento/Pterodactyl-Installer${NC}"
-  echo -e ""
-}
-
-main "$@"
+    </dev/fd/63: line 649: unexpected EOF while looking for matching `"'`
+/dev/fd/63: line 650: syntax error: unexpected end of file
